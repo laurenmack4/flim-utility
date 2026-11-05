@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "flim-utility"
+version = "0.1.0"
+description = ""
+authors = ["Daniel Olesker <daniel.olesker@glasgow.ac.uk>"]
+readme = "README.md"
+packages = [ {include = "FlimeraData"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10, <4.0"
+numpy = ">=2.2.4,<3.0.0"
+h5py = ">=3.12.1"
+loguru = ">=0.7.3,<0.8.0"
+scikit-image = ">=0.25.0"
+imagej = ">=0.3.2,<0.4.0"
+tqdm = ">=4.67.1,<5.0.0"
+matplotlib-scalebar = "==0.8.1"
+zstandard = ">=0.23.0,<0.24.0"
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
