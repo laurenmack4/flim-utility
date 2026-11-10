@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
+from scipy.ndimage import median_filter
 
 from FlimeraData import FlimeraData, TCSPCImage, NoiseModel, FitParameters, Algorithm, LifetimeCalculator
 from FlimeraData.Util.TCSPCImage import TCSPCImage
@@ -27,8 +28,10 @@ def motion_correction_frames(data: FlimeraData,
                              ):
     """
     corrects for stage motion by splitting the data into groups of frames and combining their lifetime images.
+    Params
     :param data: FlimeraData dataset.
     :param velocity: velocity of stage in metres per second.
+    Output
     :return: LifetimeImage dataset with motion correction.
     """
 
@@ -111,7 +114,7 @@ def motion_correction_frames(data: FlimeraData,
 
 
 def motion_correction_markers(data: FlimeraData, 
-                              lifetime_calculator,
+                              lifetime_calculator: LifetimeCalculator,
                               velocity: float = 0,
                               bins: int = 1,
                               int_thresh_pc: int = 0,
@@ -119,18 +122,56 @@ def motion_correction_markers(data: FlimeraData,
                               save: bool = False):
     """
     corrects for stage motion using the x positions of photon events and frame markers
+    Params
     :param data: FlimeraData dataset
     :param velocity: velocity of stage in metres per second
+    :param bins: spatial binning factor of TCSPC image
+    :param int_thresh_pc: percentage of intensity to set threshold for fitting
+    :output: whether to present the graphs and images
+    :save: whether to save the graphs and images
+    Output
     :return: LifetimeImage dataset with motion correction
     """
-    markers = data.markers
-    photon_mask = (markers == 2)
-    m_width = width / data.magnification
 
-    # extraction of relevant arrays and masking  # units
-    micro_times = data.micro_times[photon_mask]  # bins
-    x_positions = data.x_positions[photon_mask]  # pix
-    y_positions = data.y_positions[photon_mask]  # pix
+    m_width = data.pixel_width / data.magnification
+
+    ### hot pixel removal ###
+    raw_int = data.generate_intensity_image(remove_outliers=False)
+    hot_pixel_map = np.zeros_like(raw_int)
+    # changed kernel size from dans' code from 3 to 5
+    hot_pixel_map[raw_int > median_filter(raw_int, 5) * 1.5] = 1
+
+    # get the original markers
+    x_markers = data.x_positions.copy()
+    y_markers = data.y_positions.copy()
+    markers = data.markers.copy()
+
+    # mask of photon events
+    photon_mask = (markers == 2)
+    assert len(photon_mask) == len(markers), \
+        f'{np.shape(photon_mask)} != {np.shape(markers)}'
+
+    x_positions = x_markers[photon_mask]
+    y_positions = y_markers[photon_mask]
+
+    # mask of hot pixel events
+    hot_photon_mask = np.zeros_like(markers, dtype=bool)
+    hot_photon_mask[photon_mask] = (hot_pixel_map[y_positions, x_positions] == 1)
+    assert len(hot_photon_mask) == len(markers), \
+        f'{np.shape(hot_photon_mask)} != {np.shape(markers)}'
+
+    # getting rid of hot pixel events
+    markers[hot_photon_mask] = 3
+    assert len(np.unique(markers)) == 3, \
+        f'missing a marker type, {np.unique(markers)}'
+
+    # now select only good photon events
+    photon_events_mask = (markers == 2)    
+
+    ### normal loading from here ###
+    micro_times = data.micro_times[photon_events_mask]  # bins
+    x_positions = x_markers[photon_events_mask]  # pix
+    y_positions = y_markers[photon_events_mask]  # pix
 
     # setting time
     t_min = micro_times.min()
@@ -140,13 +181,13 @@ def motion_correction_markers(data: FlimeraData,
 
     # finding approx macro time from the photon's frame number (ie seconds since frame 0)
     photon_indices = np.flatnonzero(photon_mask)    # indices of nonzero events
-    frame_indices = np.searchsorted(data.frame_starts, photon_indices) -1   # indices of nonzero events wrt frame starts
+    frame_indices = np.searchsorted(data.frame_starts, photon_indices) - 1   # indices of nonzero events wrt frame starts
 
     photon_macro_times = frame_indices / data.frame_rate    # conversion frame -> seconds
     photon_distances = (photon_macro_times * velocity) / m_width  # conversion metres -> pixels
 
     # raw position - moving distance + centering correction
-    corrected_y_positions = np.rint(y_positions + photon_distances + 30).astype(np.intp, copy=False)
+    corrected_y_positions = np.rint(y_positions + photon_distances - np.mean(photon_distances)).astype(np.intp, copy=False)
 
     # validity checker because it messes up bincount if things outside image dims
     # prob fixable somehow without cutting out data
@@ -159,9 +200,6 @@ def motion_correction_markers(data: FlimeraData,
 
     # actually making the tcspc image
     tcspc_arr = np.bincount(lin, minlength=dim_x * dim_y * num_bins).reshape((dim_y, dim_x, num_bins))
-    t_outlier_map = 1 - data.pixel_outlier_map
-    #tcspc_arr = tcspc_arr * t_outlier_map[:, :, None]
-
 
     # in a construct for fitting
     tcspc_imag = TCSPCImage(image=tcspc_arr, irf=None, 
@@ -169,10 +207,10 @@ def motion_correction_markers(data: FlimeraData,
                             pixel_width=data.pixel_width/data.magnification)
     tcspc_imag = tcspc_imag.bin_image(bins, bins, 1)
 
-    fit_start = np.median(np.argmax(tcspc_imag.image, axis=2)).astype(int) + 10
+    fit_start = np.median(np.argmax(tcspc_imag.image, axis=2)).astype(int) + 100
     fit_end = num_bins - 1
+    
     # fitting in flimj
-    # again fit range should be automated somehow, this is from visual inspection
     fit_parameters = FitParameters(noise_model=NoiseModel.POISSON_DATA, algorithm=Algorithm.GLOBAL, 
                                    intensity_threshold_percent=int_thresh_pc, lifetime_range=(0, 8e-9), 
                                    fit_range=(fit_start, fit_end),num_lifetime_components=1)
@@ -181,12 +219,19 @@ def motion_correction_markers(data: FlimeraData,
 
     # lets have a look then
     if output:
-        fig, ax = plt.subplots()
-        im = ax.imshow(lifetime_imag.average_lifetime_image*1e9, cmap='turbo', aspect=data.pixel_width/data.pixel_height)
-        cb = plt.colorbar(im, ax=ax, location='right', fraction=0.04, pad=0,
+        fig, ax = plt.subplots(1, 2)
+        im = ax[0].imshow(lifetime_imag.average_lifetime_image*1e9, cmap='turbo', aspect=data.pixel_width/data.pixel_height)
+        cb = plt.colorbar(im, ax=ax[0], location='right', fraction=0.065, pad=0,
                         label='mean lifetime (ns)')
-        ax.set_axis_off()
-        ax.set_title(f'Lifetime corrected for velocity = {velocity * -1e6:.3g} micron/s')
+        ax[0].set_axis_off()
+        ax[0].set_title(f'Mean Lifetime')
+
+        im = ax[1].imshow(lifetime_imag.tcspc_image.intensity_image, cmap='gist_gray', aspect=data.pixel_width/data.pixel_height)
+        cb = plt.colorbar(im, ax=ax[1], location='right', fraction=0.065, pad=0,
+                        label='counts')
+        ax[1].set_axis_off()
+        ax[1].set_title(f'Intensity')
+        plt.suptitle(f'Corrected for velocity = {velocity * -1e6:.3g} micron/s')
         plt.tight_layout()
         if save:
             plt.savefig(f'_lifetime_corrected.jpg')
@@ -195,19 +240,14 @@ def motion_correction_markers(data: FlimeraData,
 
     return lifetime_imag
 
-# if method_frames==1 and method_marker==0:
-#     motion_correction_frames(flimera_data, velocity, num_g)
-# elif method_marker==1 and method_frames==0:
-#     motion_correction_markers(flimera_data, velocity)
-# elif method_marker==method_frames:
-#     print('choose a method for correction!')
-
 def estimate_velocity_frames(data: FlimeraData,
                              binning: int = 1):
     """
     estimates the velocity of a moving sample by comparing the location of the brightest (binned)
     pixel at the first 1000 and last 1000 frames.
+    Params
     :param data: FlimeraData dataset
+    Output
     :return: velocity of the object in metres per second
     """
     # getting the start and end frames
@@ -242,40 +282,48 @@ def estimate_velocity_frames(data: FlimeraData,
     return velocity_estimation
 
 
+def gauss(x, *p):
+    a, mu, sigma, c = p
+    return a * np.exp(-(x - mu)**2/(2. * sigma**2)) + c
 
-
-def estimate_velocity_ssq(data: FlimeraData,
+def estimate_velocity_max(data: FlimeraData,
                           lifetime_calculator,
                           v_estimate: tuple,
                           binning: int = 1
                           ):
     """
-    
-    """    
-# choose a range of velocities
-    def gauss(x, *p):
-        a, mu, sigma, c = p
-        return a * np.exp(-(x - mu)**2/(2. * sigma**2)) + c
-
+    function to estimate the velocity of a moving TCSPC dataset via a maximisation function
+    currently: spatial variance of temporal variance
+    assumes movement from the right to left of EZTime image view (so +ve to -ve y position for CAF setup)
+    Params
+    :param data: flimera dataset, photon stream 
+    :param lifetime_calculator: lifetime calculator object
+    :param v_estimate: an estimated lower and upper bound for velocity in microns per second
+    :param binning: spatial binning factor used in reconstructions that estimate velocity
+    Output
+    :return: velocity of object in metres per second
+    """   
+    # choose a range of velocities
     v_low, v_high = v_estimate
     v_range = np.linspace(v_low, v_high, 10)
 
-    ssq = np.zeros_like(v_range)
+    max_method = np.zeros_like(v_range)
     # make a recon for each velocity
     count = 0
     for v in v_range:
         velocity = v * -1e-6
         recon_tcspc = motion_correction_markers(data, lifetime_calculator, velocity=velocity, output=False, bins=binning)
-        sq_int_tcspc = recon_tcspc.tcspc_image.intensity_image ** 2
-        sum_sq_int = np.sum(sq_int_tcspc)
-        ssq[count] = sum_sq_int
+        # this is the factor used to estimate velocity: spatial variance of temporal variance
+        var_temp = np.var(recon_tcspc.tcspc_image.image, axis=2)
+        var_spatial = np.var(var_temp)
+        max_method[count] = var_spatial
         count += 1
         # plt.imshow(recon_tcspc.tcspc_image.intensity_image)
         # plt.title(f'{velocity}')
         # plt.colorbar()
         # plt.show()
         
-    plt.plot(v_range, ssq/np.max(ssq), label=f'Sum squared I: x/y binning={binning}')
+    plt.plot(v_range, max_method/np.max(max_method), label=f'Sum squared I: x/y binning={binning}')
 
     # params for fitting to gaussian
     p0 = [0.5, np.mean(v_range), 1., 0.5]
@@ -285,7 +333,7 @@ def estimate_velocity_ssq(data: FlimeraData,
     # fitting to the normalised curve because the numbers are so big
     # gaussian fit is useful because velocity range can be quite spread and so peak of ssq might not be ideal velocity
     # this is not slowing things down tremendously, it takes about 3 ms
-    coeff, _ = curve_fit(gauss, v_range, ssq/np.max(ssq), p0=p0, 
+    coeff, _ = curve_fit(gauss, v_range, max_method/np.max(max_method), p0=p0, 
                                 maxfev=1000, bounds=[low_bounds, up_bounds])
     # [0] is amplitude scaling, [1] is mean mu (velocity), [2] is standard dev sigma, [3] is offset
 
