@@ -11,13 +11,6 @@ dim_y = 127
 width = 18.4 * 1e-6
 height = 9.2 * 1e-6
 
-
-# select method
-# method_marker = 1
-# method_frames = 0
-
-#flimera_data = FlimeraData(file_path=fname, magnification=40)
-
 def motion_correction_frames(data: FlimeraData, 
                              lifetime_calculator,
                              velocity: float = 0, 
@@ -119,7 +112,8 @@ def motion_correction_markers(data: FlimeraData,
                               bins: int = 1,
                               int_thresh_pc: int = 0,
                               output: bool = True,
-                              save: bool = False):
+                              save: bool = False,
+                              saveloc: str = None):
     """
     corrects for stage motion using the x positions of photon events and frame markers
     Params
@@ -133,7 +127,7 @@ def motion_correction_markers(data: FlimeraData,
     :return: LifetimeImage dataset with motion correction
     """
 
-    m_width = data.pixel_width / data.magnification
+    m_width = data.pixel_width * 1e-6 / data.magnification
 
     ### hot pixel removal ###
     raw_int = data.generate_intensity_image(remove_outliers=False)
@@ -180,7 +174,7 @@ def motion_correction_markers(data: FlimeraData,
     num_bins = int(t_max) + 1
 
     # finding approx macro time from the photon's frame number (ie seconds since frame 0)
-    photon_indices = np.flatnonzero(photon_mask)    # indices of nonzero events
+    photon_indices = np.flatnonzero(photon_events_mask)    # indices of nonzero events
     frame_indices = np.searchsorted(data.frame_starts, photon_indices) - 1   # indices of nonzero events wrt frame starts
 
     photon_macro_times = frame_indices / data.frame_rate    # conversion frame -> seconds
@@ -207,7 +201,7 @@ def motion_correction_markers(data: FlimeraData,
                             pixel_width=data.pixel_width/data.magnification)
     tcspc_imag = tcspc_imag.bin_image(bins, bins, 1)
 
-    fit_start = np.median(np.argmax(tcspc_imag.image, axis=2)).astype(int) + 100
+    fit_start = np.median(np.argmax(tcspc_imag.image, axis=2)).astype(int)
     fit_end = num_bins - 1
     
     # fitting in flimj
@@ -233,10 +227,26 @@ def motion_correction_markers(data: FlimeraData,
         ax[1].set_title(f'Intensity')
         plt.suptitle(f'Corrected for velocity = {velocity * -1e6:.3g} micron/s')
         plt.tight_layout()
-        if save:
-            plt.savefig(f'_lifetime_corrected.jpg')
-        else:
-            plt.show()
+        plt.show()
+        plt.close()
+    if save:
+        fig, ax = plt.subplots(1, 2)
+        im = ax[0].imshow(lifetime_imag.average_lifetime_image*1e9, cmap='turbo', aspect=data.pixel_width/data.pixel_height)
+        cb = plt.colorbar(im, ax=ax[0], location='right', fraction=0.065, pad=0,
+                        label='mean lifetime (ns)')
+        ax[0].set_axis_off()
+        ax[0].set_title(f'Mean Lifetime')
+
+        im = ax[1].imshow(lifetime_imag.tcspc_image.intensity_image, cmap='gist_gray', aspect=data.pixel_width/data.pixel_height)
+        cb = plt.colorbar(im, ax=ax[1], location='right', fraction=0.065, pad=0,
+                        label='counts')
+        ax[1].set_axis_off()
+        ax[1].set_title(f'Intensity')
+        plt.suptitle(f'Corrected for velocity = {velocity * -1e6:.3g} micron/s')
+        plt.tight_layout()
+        plt.savefig(saveloc)
+        plt.close()
+
 
     return lifetime_imag
 
@@ -266,6 +276,7 @@ def estimate_velocity_frames(data: FlimeraData,
     plt.plot(end_binned.intensity_argmax[1], end_binned.intensity_argmax[0], marker='x', color='g', markersize=10, label='end argmax')
     plt.legend()
     plt.show()
+    plt.close()
 
     # find the centre of the area of largest mean intensity
     # assuming direction of motion in image is top to bottom
@@ -289,7 +300,8 @@ def gauss(x, *p):
 def estimate_velocity_max(data: FlimeraData,
                           lifetime_calculator,
                           v_estimate: tuple,
-                          binning: int = 1
+                          binning: int = 1,
+                          output: bool = True
                           ):
     """
     function to estimate the velocity of a moving TCSPC dataset via a maximisation function
@@ -322,28 +334,29 @@ def estimate_velocity_max(data: FlimeraData,
         # plt.title(f'{velocity}')
         # plt.colorbar()
         # plt.show()
-        
-    plt.plot(v_range, max_method/np.max(max_method), label=f'Sum squared I: x/y binning={binning}')
+    if output:
+        plt.plot(v_range, max_method/np.max(max_method), label=f'Sum squared I: x/y binning={binning}')
 
     # params for fitting to gaussian
-    p0 = [0.5, np.mean(v_range), 1., 0.5]
-    low_bounds = [0., np.min(v_range), 0., 0.]
-    up_bounds = [1., np.max(v_range), 20., 1.]
+    p0 = [0.9, v_range.mean(), v_high/2, 0.5]
+    low_bounds = [0., v_low, 0., 0.]
+    up_bounds = [1., v_high, v_high, v_high]
 
     # fitting to the normalised curve because the numbers are so big
     # gaussian fit is useful because velocity range can be quite spread and so peak of ssq might not be ideal velocity
     # this is not slowing things down tremendously, it takes about 3 ms
     coeff, _ = curve_fit(gauss, v_range, max_method/np.max(max_method), p0=p0, 
-                                maxfev=1000, bounds=[low_bounds, up_bounds])
+                                maxfev=5000, bounds=[low_bounds, up_bounds])
     # [0] is amplitude scaling, [1] is mean mu (velocity), [2] is standard dev sigma, [3] is offset
 
     fit = gauss(np.linspace(v_range.min(), v_range.max(), 100), *coeff)
 
-    plt.plot(np.linspace(v_range.min(), v_range.max(), 100), fit, label=f'Fit: mu={coeff[1]:.3g} sigma={coeff[2]:.3g}')
-    plt.xlabel('Velocity (micron/second)')
-    plt.ylabel('Sum of squared intensities')
-    plt.title('Gaussian fit to SSI')
-    plt.legend()
-    plt.show()
+    if output:
+        plt.plot(np.linspace(v_range.min(), v_range.max(), 100), fit, label=f'Fit: mu={coeff[1]:.3g} sigma={coeff[2]:.3g}')
+        plt.xlabel('Velocity (micron/second)')
+        plt.ylabel('Sum of squared intensities')
+        plt.title('Gaussian fit to SSI')
+        plt.legend()
+        plt.show()
 
     return coeff[1] * 1e-6
