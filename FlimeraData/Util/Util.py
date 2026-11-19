@@ -55,7 +55,21 @@ def generate_intensity_sequence(flimera_data,
 
     return sequence
 
-def calculate_photon_flux(flimera_data, frame_range: tuple = None, plot=True, fig_size: tuple=(6, 4)):
+def average_counts(flux, window=10):
+    """
+    Averages a flux over a window.
+    :param flux: photon flux, array of counts arriving over time.
+    :param window: window size in indices.
+    """
+    cumulative = np.concatenate(([0.0], np.cumsum(flux)))
+    frames = np.arange(len(flux))
+    start = np.maximum(0, frames - window // 2)
+    end = np.minimum(len(flux), frames + (window - window // 2))
+
+    return (cumulative[end] - cumulative[start]) / (end - start)
+
+
+def calculate_photon_flux(flimera_data, frame_range: tuple = None, plot=True, fig_size: tuple=(6, 4), window: int=0):
     """
     Plot the photon flux arriving at the Flimera.
     :param plot: whether to plot the flux.
@@ -73,12 +87,18 @@ def calculate_photon_flux(flimera_data, frame_range: tuple = None, plot=True, fi
 
     t_axis = np.linspace(0, len(flux) * 1 / flimera_data.frame_rate, len(flux))
 
+    if window > 0:
+        smoothed_flux = average_counts(flux=flux, window=window)
+
     if plot:
         fig, ax = plt.subplots(1, 1, figsize=fig_size)
-        ax.plot(t_axis, flux, ".")
+        ax.plot(t_axis, flux, ".", label='raw flux')
+        if window > 0:
+            ax.plot(t_axis, smoothed_flux, label=f'average over {window} frames')
         ax.set_title("Photon Flux")
         ax.set_xlabel("t (seconds)")
         ax.set_ylabel("Flux")
+        ax.legend()
 
     return flux
 

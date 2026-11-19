@@ -217,7 +217,7 @@ class LifetimeCalculator:
         self._fit_parameters.getFittedMap = True
         self._fit_parameters.getResidualsMap = True
         self._fit_parameters.getChisqMap = True
-        self._fit_parameters.iThresh = fit_parameters.intensity_threshold # lauren did this
+        self._fit_parameters.iThresh = fit_parameters.intensity_threshold
         self._fit_parameters.iThreshPercent = fit_parameters.intensity_threshold_percent
 
         if initial_guess is not None:
@@ -706,6 +706,31 @@ class LifetimeFitResult:
         ax[1].set_title("Histogram of Residual Values"), ax[1].set_xlabel("Residual Value"), ax[1].set_ylabel("Count")
 
         np.seterr(divide='warn')
+
+
+    def lifetime_distribution(self, title:str = None):
+        """
+        Plot a histogram distribution of fitted lifetimes
+        :param title: additional string to put in plot title
+        """
+
+        bright_tau1 = self._get_lifetime_image()
+        tau1 = np.asarray(bright_tau1).ravel() * 1e9
+        tau1 = tau1[tau1 != 0]
+        tau1_mean = np.mean(tau1)
+        tau1_std = np.std(tau1)
+
+        counts, bins, _ = plt.hist(tau1, bins='auto', linewidth=1.5, alpha=0.4, label=f'Lifetimes N={len(tau1)}')
+        plt.axvline(x=tau1_mean, color='darkred', label=f'Mean={tau1_mean:.3g}ns', linewidth=2)
+        plt.hlines(y=counts.max()//2, xmin=tau1_mean-tau1_std, xmax=tau1_mean+tau1_std, color='darkred', label=f'STDEV={tau1_std:.3g}ns', linewidth=2,
+                linestyle='--')
+        plt.title('Lifetime distribution ' + title)
+        plt.legend(loc='upper right')
+        plt.xlabel('Lifetime (ns)')
+        plt.ylabel('Number of occurences')
+        plt.show()
+            
+
 
 
 def find_fit_start_and_end(residuals, histogram, fit):
